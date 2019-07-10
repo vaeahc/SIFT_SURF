@@ -1,0 +1,471 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Jul  5 21:34:25 2019
+
+@author: vaea
+"""
+#SIFT图像特征检测算子
+
+import numpy as np
+import cv2
+
+class SIFT:
+    
+    def __init__(self, img, s, img_border):
+        
+        self.sigma_init = 1.6
+        self.im = cv2.resize(img, (img.shape[0] * 2, img.shape[1] * 2))
+        self.im = cv2.GaussianBlur(self.im, (5, 5), self.sigma_init ** 2 - 0.5 ** 2 * 4)
+        self.s = s
+        self.octaves = np.log2(min(self.im.shape[0], self.im.shape[1])) - 2
+        self.img_border = img_border
+        '''
+        self.ddata, 关键点信息
+        self.ddata_index
+        self.features
+        self.feature_index
+        self.DOG_pyr， 差分金字塔
+        self.Gaussian_pyr，高斯金字塔
+        '''
+        
+        pass
+    
+    def pyramid(self):
+        
+        k = np.power(1 / 2, 1 / self.s)
+        
+        #建立尺度域
+        sigma = np.zeros([self.s + 3, ])
+        sigma[0] = 1.6
+        sigma[1] = sigma[0] * np.sqrt(k ** 2 - 1)
+        for i in range(2, 6):
+            sigma[i] = sigma[i - 1] * k
+        
+        #建立Gaussian金字塔
+        self.Gaussian_pyr = [[0] * (self.s + 3) for i in range(self.octaves)]
+        for i in range(self.octaves):
+            for j in range(self.s + 3):
+                if i == 0 and j == 0:
+                    self.Gaussian_pyr[i][j] = self.im
+                    
+                elif i != 0 and j == 0:
+                    temp = self.Gaussian_pyr[i - 1][-3]
+                    self.Gaussian_pyr[i][j] = cv2.resize(temp, (temp.shape[0] / 2, temp.shape[1] /2))
+                
+                else:
+                    self.Gaussian_pyr[i][j] = cv2.GaussianBlur(self.Gaussian_pyr[i][j - 1], (5, 5), sigma[j])
+        self.Gaussian_pyr = np.array(self.Gaussian_pyr)
+        
+        #建立Gaussian差分金字塔
+        self.DOG_pyr  = [[0] * (self.s + 2) for i in range(self.octaves)]
+        for i in range(self.octaves):
+            for j in range(self.s + 2):
+                self.DOG_pyr[i][j] = self.Gaussian_pyr[i][j + 1] - self.Gaussian_pyr[i][j]
+        self.DOG_pyr = np.array(self.DOG_pyr)
+        
+    def local_extremun(self):
+        
+        #局部极值,img为一维确定的array
+        def isextremum(img,interval, x , y):
+            #极大值   
+            value = img[interval][x][y]
+            if value > 0:    
+                for k in range(-1, 2):
+                    for i in range(-1, 2):
+                        for j in range(-1, 2):
+                            if value < img[interval + k][x + i][y + j]:
+                                return 0
+            #极小值
+            else:
+                for k in range(-1, 2):
+                    for i in range(-1, 2):
+                        for j in range(-1, 2):
+                            if value > img[interval + k][x + i][y + i]:
+                                return 0
+            return 1
+        #求三维梯度,img为一维确定的array
+        def deriv3D(img, interval , x, y):
+            #前向梯度和后向梯度的平均
+            dx = (img[interval][x + 1][y] - img[interval][x - 1][y]) / 2
+            dy = (img[interval][x][y + 1] - img[interval][x][y - 1]) / 2
+            ds = (img[interval + 1][x][y] - img[interval - 1][x][y]) / 2
+        
+            return np.array([dx, dy, ds])
+
+        #求hessian矩阵
+        def hessian3D(img, interval, x, y):
+            #中间像素
+            center = img[interval][x][y]
+    
+            dxx = img[interval][x - 1][y] + img[interval][x + 1][y] - 2 * center
+            dyy = img[interval][x][y - 1] + img[interval][x][y + 1] - 2 * center
+            dss = img[interval - 1][x][y] + img[interval + 1][x][y] - 2 * center
+
+            dxy = ((img[interval][x + 1][y + 1] + img[interval][x - 1][y - 1] 
+                - img[interval][x - 1][y + 1] - img[interval][x + 1][y - 1]) / 4)
+            dxs = ((img[interval + 1][x + 1][y] + img[interval - 1][x - 1][y] 
+                - img[interval + 1][x - 1][y] - img[interval - 1][x + 1][y]) / 4)
+            dys = ((img[interval + 1][x][y + 1] + img[interval - 1][x][y - 1] 
+                - img[interval - 1][x][y + 1] - img[interval + 1][x][y - 1]) / 4)
+            
+            result = [[dxx, dxy, dxs], [dxy, dyy, dys], [dxs, dys, dss]]
+            return np.array(result)
+
+        def interplocation(max_iter, img_border, img, octave, interval, x, y, contr_thr, height, width):
+    
+            i = 0
+            while i < max_iter:
+                dD = deriv3D(img, interval, x, y)
+                H = hessian3D(img, interval, x, y)
+                #计算当前点和关键点的偏移量
+                X_hat = -np.dot(np.linalg.pinv(H), dD) #求解广义逆矩阵, np.linalg.pinv
+                if X_hat[0] < 0.5 and X_hat[1] < 0.5 and X_hat[2] < 0.5:
+                    break
+                x += round(X_hat[0])
+                y += round(X_hat[1])
+                interval += round(X_hat[2])
+                #类型转换
+                x = np.int(x)
+                y = np.int(y)
+                interval = np.int(interval)
+                if interval < 1 or interval > self.s or x < img_border or x >= height - img_border or y < img_border or y >= width - img_border:
+                    result = {}
+                return result
+                i += 1
+                
+            if i == max_iter:
+                result = {}
+                return result
+        
+            #低反差点检测
+            contr = img[interval][x][y] + 0.5 * np.dot(dD.T, X_hat)
+            #此处contr_thr = 0.04
+            if abs(contr) < contr_thr / self.s:
+                result = {}
+                return result
+            result = { 'x': x, 
+                       'y': y,
+                       'octv': octave,
+                       'intvl': interval,
+                       'X_hat': X_hat,
+                       #scl_octave为层内的尺度
+                       'scl_octave': self.sigma_init * np.power(2, (interval + X_hat[2] - 1) / self.s)
+                     }
+            return result
+        
+        #出去边缘点，curv_thr = 10, img为一维确定的array
+        def isedges(img,interval, x, y, curv_thr):
+            
+            center = img[interval][x][y]           
+            dxx = img[interval][x - 1][y] + img[interval][x + 1][y] - 2 * center
+            dyy = img[interval][x][y - 1] + img[interval][x][y + 1] - 2 * center
+            dxy = ((img[interval][x + 1][y + 1] + img[interval][x - 1][y - 1] - img[interval][x + 1][y - 1]      
+                     - img[interval][x - 1][y + 1]) / 4)
+            #hessian矩阵的秩
+            tr = dxx + dyy
+            #hessian矩阵的行列式
+            det = dxx * dyy - dxy ** 2  
+            
+            if det <= 0:
+                return 1
+            elif (tr ** 2 / det) < (curv_thr + 1) ** 2 / curv_thr:
+                return 0
+            return 1
+        
+        max_iter = 5
+        contr_thr = 0.4
+        curv_thr = 10
+        prelim_contr_thr = 0.5 * contr_thr/self.s
+        #记录关键点的信息
+        self.ddata = {}
+        self.ddata_index = 0
+        for i in range(self.octaves):
+            img = self.DOG_pyr[i]
+            for j in range(1, self.s + 1):
+                height = img[j].shape[0]
+                width = img[j].shape[1]
+                for x in range(self.img_border, height - self.img_border):
+                    for y in range(self.img_border, width - self.img_border):
+                        #检查灰度阈值
+                        if abs(img[j][x][y]) > prelim_contr_thr:
+                            #检查局部极值
+                            if isextremum(img, j, x, y):
+                                res = interplocation(max_iter, self.img_border, img, i, j, x, y, contr_thr, height, width)
+                                if res:
+                                    if not isedges(img, j, x, y, curv_thr):
+                                    #信息存储到ddata中
+                                        self.ddata[self.ddata_index] = res
+                                        self.ddata_index += 1
+    
+    def calGrad(self, img, interval, x, y):
+            #mag_ori[0]记录梯度大小，mag_ori[1]记录梯度方向
+            mag_ori = np.zeros((2, ))
+            height = img[interval].shape[0]
+            width = img[interval].shape[1]
+            
+            if x >= 1 and x < height - 1 and y >= 1 and y < width - 1:
+                #前向梯度
+                dx = img[interval][x - 1][y] - img[interval][x + 1][y]
+                dy = img[interval][x][y - 1] - img[interval][x][y + 1]
+                mag_ori[0] = np.sqrt(dx ** 2 + dy ** 2) / 2
+                mag_ori[1] = np.arctan(dy / dx)
+                
+            else:
+                mag_ori[0] = -1
+                mag_ori[1] = -1
+                
+            return mag_ori                                   
+    #特征子描述    
+    def get_ori(self):
+        
+        def oriHist(img, interval, x, y, n, rad, sigma):
+            #直方图，n为柱子数量（bins）
+            hist = np.zeros((n,))
+            
+            for i in range(-rad, rad + 1):
+                for j in range(-rad, rad + 1):
+                    grad = self.calGrad(img, interval, x, y)
+                    if grad[0] != -1:
+                        #高斯加权,柱子序号
+                        w = np.exp(-(i ** 2 + j ** 2) / (2 * sigma ** 2))
+                        bins = round(np.pi + grad[1]) * n / (2 * np.pi)
+                        
+                        if bins == n:
+                            bins = 0
+                        hist[bins] += w * grad[0]
+                        
+            return hist
+        
+        def smoothHist(hist, n):
+            #hist为直方图，n为柱子数量
+            for i in range(n):
+                if i == 0:
+                    pre_b = n - 1
+                    next_b = i + 1
+                    
+                elif i == n - 1:
+                    pre_b = i - 1
+                    next_b = 0
+                
+                else:
+                    pre_b = i - 1
+                    next_b = i + 1
+                    
+                hist[i] = 0.25 * hist[pre_b] + 0.5 * hist[i] + 0.25 * hist[next_b]
+            
+            return hist
+        
+        def ori_hist(ddata_index, feature_index, ddata, hist, n, ori_peak_ratio):
+            #ddata为某一关键点的特征，ddata_index为序号,ori_peak_ratio = 0.8
+            omax = np.max(hist)
+            #寻找幅度在峰值百分之八十以上的点
+            for i in range(n):
+                if i == 0:
+                    l = n - 1
+                    r = i + 1
+                
+                elif i == n - 1:
+                    l = i - 1
+                    r = 0
+                    
+                else:
+                    l = i - 1
+                    r = i + 1
+                
+                if hist[i] > hist[l] and hist[i] > hist[r] and hist >= omax * ori_peak_ratio:
+                    #抛物插值 求出精确的柱子序号
+                    bins = i + 0.5 * (hist[l] - hist[r]) / (hist[l] - 2 * hist[i] + hist[r])
+                    if bins < 0:
+                        bins += n - 1
+                    elif bins > n - 1:
+                        bins -= n - 1
+                        
+                    accu_interval = ddata['intvl'] + ddata['X_hat'][2]
+                    self.features[self.feature_index]['ddata_index'] = ddata_index
+                    self.features[self.feature_index]['x'] = (ddata['x'] + ddata['X_hat'][0]) * 2 ** (ddata['octv'] - 2)
+                    self.features[self.feature_index]['y'] = (ddata['y'] + ddata['X_hat'][1]) * 2 ** (ddata['octv'] - 2)
+                    self.features[self.feature_index]['scl_octave'] = self.sigma_init * np.power(2, ddata['octv'] - 2 + (accu_interval - 1) / self.s)
+                    self.features[self.feature_index]['ori'] = bins * np.pi * 2 / n - np.pi
+                    self.feature_index += 1
+                    
+        ori_peak_ratio = 0.8
+        #柱子数量
+        ori_hist_bins = 36
+        #高斯加权背倍数
+        ori_sig_fac = 1.5
+        #更新后所有的关键点信息
+        self.features = {}
+        self.feature_index = 0
+        n = self.ddata_index
+        for i in range(n):
+            ddata = self.ddata[i]
+            
+            ori_sigma = ori_sig_fac * ddata['scl_octave']
+            hist = oriHist(self.Gaussian_pyr[ddata['octv']], ddata['intvl'], ddata['x'], ddata['y'], ori_hist_bins, round(3 * ori_sigma), ori_sigma)
+            #平滑直方图
+            for j in range(2):
+                hist = smoothHist(hist, ori_hist_bins)
+            ori_hist(i, self.feature_index, ddata, hist, ori_hist_bins, ori_peak_ratio)
+    
+    #为每一个关键点分配描述子        
+    def Desrib_feature(self):
+        #三线性插值
+        def interpHistEntry(hist, r, c, o, m, d, obins):
+            
+            r0 = int(r)
+            c0 = int(c)
+            o0 = int(o)
+            d_r = r - r0
+            d_c = c - c0
+            d_o = o - o0
+            
+            for i in range(2):
+                r_index = r0 + i
+                if r_index >= 0 and r_index < d:
+                    for j in range(2):
+                        c_index = c0 + j
+                        if c_index >= 0 and c_index < d:
+                            for k in range(2):
+                                o_index = (o0 + k) % obins
+                                #计算正方体顶点数值
+                                temp1 = 0.5 + (d_r - 0.5) * (2 * i - 1)
+                                temp2 = 0.5 + (d_c - 0.5) * (2 * j - 1)
+                                temp3 = 0.5 + (d_o - 0.5) * (2 * k - 1)
+                                value = w * temp1 * temp2 * temp3
+                                #计算特征向量的索引
+                                hist_index = r_index * d * obins + c_index * obins + o_index
+                                hist[hist_index] += value
+            
+            return hist
+        
+        n = self.feature_index
+        #子区域为4*4
+        descr_hist_d = 4
+        #每个子区域分配八个方向
+        descr_hist_obins = 8
+        descr_mag_thr = 0.2
+        #128维向量描述子
+        descr_length = descr_hist_d*descr_hist_d*descr_hist_obins
+        
+        for feature_index in range(n):
+            feature = self.feature[feature_index]
+            ddata = self.ddata[feature['ddata_index']]
+            img = self.Gaussian_pyr[ddata['octv']]
+            #每个子区域需要的长度
+            hist_width = 3 * ddata['scl_octave']
+            #考虑插值和旋转以后计算所需的所有像素区域
+            radius = round(hist_width * np.sqrt(2) * (descr_hist_d + 1) / 2)
+            
+            feature_ori = feature['ori']
+            ddata_x = ddata['x']
+            ddata_y = ddata['y']
+            #每个关键点的描述子
+            hist = np.zeros((descr_length, ))
+            for i in range(-radius, radius + 1):
+                for j in range(radius, radius + 1):
+                    #计算旋转到主方向后坐标
+                    j_rot = j * np.cos(feature_ori) - i * np.sin(feature_ori)
+                    i_rot = j * np.sin(feature_ori) + i * np.cos(feature_ori)
+                    #子区域坐标   
+                    r_bin = i_rot / hist_width + descr_hist_d / 2 - 0.5
+                    c_bin = j_rot / hist_width + descr_hist_d / 2 - 0.5
+                    
+                    if r_bin >= 0 and r_bin < descr_hist_d and c_bin >= 0 and c_bin < descr_hist_d:
+                        #计算每个像素的梯度信息
+                        mmag_ori = self.calGrad(img, ddata['intvl'], ddata_x + i, ddata_y + j)
+                        if mmag_ori[1] != -1:
+                            ori = mmag_ori[1]
+                            #旋转到主方向后的相对方向
+                            ori -= feature_ori
+                            #边界处理
+                            while ori < 0:
+                                ori += np.pi * 2
+                                
+                            while ori > np.pi * 2:
+                                ori -= np.pi * 2
+                                
+                            o_bin = ori * descr_hist_d / (2 * np.pi)
+                            w = np.exp(-(j_rot ** 2 + i_rot ** 2) / (2 * (descr_hist_d * hist_width / 2) ** 2))
+                            hist = interpHistEntry(hist, r_bin, c_bin, o_bin, mmag_ori(0) * w, descr_hist_d, descr_hist_obins)
+            
+            #归一化描述子并除去光照等对灰度的影响                
+            hist /= np.linalg.norm(hist)
+            hist = np.minimum(hist, descr_mag_thr)
+            hist /= np.linalg.norm(hist)
+            #为关键点添加一个描述子
+            feature['hist'] = hist
+            self.features[feature_index] = feature
+            
+    #SIFT类返回值    
+    def get_points(self):
+        #将关键点按照尺度大小从小到大排序
+        scl = sorted(self.features.items(), key = lambda x: x[1]['descr_mag_thr'])
+        
+        
+        points = [np.zeros((2, ))] * len(scl)
+        descr = [0] * len(scl)
+        flag = 0
+        
+        for _, feature in scl:
+            #描述子
+            descr[flag] = feature['hist']
+            #位置信息
+            points[flag][0] = feature['x']
+            points[flag][1] = feature['y']
+            
+            flag += 1
+        
+        return points, descr
+            
+        
+            
+                            
+                            
+                            
+                        
+            
+        
+        
+        
+    
+                
+            
+                    
+        
+            
+            
+        
+            
+            
+            
+            
+                    
+                
+    
+            
+        
+                        
+                    
+            
+        
+                                            
+                                
+                
+        
+        
+            
+        
+        
+    
+        
+                    
+                    
+                    
+          
+        
+        
+        
+     
+        
+        
